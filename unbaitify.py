@@ -1,13 +1,17 @@
 import os
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import classification_report
+from sklearn.metrics import f1_score, accuracy_score, recall_score
 import joblib
 import cv2
 
@@ -101,7 +105,7 @@ class CombinedFeatures(BaseEstimator, TransformerMixin):
 class Trainer:
 	def __init__(self, feature_extractor, model=None):
 		self.feature_extractor = feature_extractor
-		self.model = model or RandomForestClassifier(n_estimators=100, random_state=42)
+		self.model = model if model is not None else RandomForestClassifier(n_estimators=100, random_state=42)
 
 	def fit(self, X, y):
 		X_transformed = self.feature_extractor.fit_transform(X, y)
@@ -126,7 +130,7 @@ class Trainer:
 # === LOAD DATA FUNCTIONS ===
 def load_title_only_dataset():
 	df = pd.read_csv(ONLY_TITLE_DATASET_PATH)
-	df = df.rename(columns={'Title': 'Video Title'})  # adapt if needed
+	df = df.rename(columns={'Title': 'Video Title'})
 	df['Label'] = df['Label'].astype(int)
 	return df
 
@@ -157,35 +161,64 @@ class EnsembleModel:
 
 # === TRAINING BOTH MODELS AND SAVING ===
 def train_and_save_models():
-	# Train old model on old dataset (titles only)
+	from sklearn.metrics import f1_score, accuracy_score
+
+	def evaluate_model(model_name, trainer, X_test, y_test):
+		y_pred = trainer.predict(X_test)
+		acc = accuracy_score(y_test, y_pred)
+		f1 = f1_score(y_test, y_pred, average='macro')
+		recall = recall_score(y_test, y_pred, average='macro')
+
+		print(f"\n=== {model_name} Classification Report ===")
+		print(classification_report(y_test, y_pred, digits=4))
+		return acc, f1, recall
+
+	title_scores = {}
+	rich_scores = {}
+
+	# Title-only models
 	if os.path.exists(ONLY_TITLE_DATASET_PATH):
 		old_data = load_title_only_dataset()
 		X_old = old_data[['Video Title']]
 		y_old = old_data['Label']
+		X_train, X_test, y_train, y_test = train_test_split(X_old, y_old, test_size=0.2, random_state=42)
 
-		trainer_old = Trainer(TextOnlyFeatures())
-		trainer_old.fit(X_old, y_old)
-		trainer_old.save(MODEL_TITLE_ONLY_PATH)
-		print("Old model trained and saved.")
+		print("\n--- Title-Only Models ---")
+		for model_name, model in [
+			("Random Forest", RandomForestClassifier(n_estimators=100, random_state=42)),
+			("Logistic Regression", LogisticRegression(max_iter=1000)),
+			("SVM", SVC(kernel="linear", probability=False))
+		]:
+			trainer = Trainer(TextOnlyFeatures(), model=model)
+			trainer.fit(X_train, y_train)
+			acc, f1, recall = evaluate_model(f"{model_name} (Title Only)", trainer, X_test, y_test)
+			title_scores[model_name] = (acc, f1, recall)
 	else:
-		trainer_old = None
-		print("Old dataset not found, skipping old model training.")
+		print("Old dataset not found, skipping title-only model training.")
 
-	# Train new model on new dataset (full features)
+	# Rich feature models
 	if os.path.exists(RICH_CLICKBAIT_PATH) and os.path.exists(RICH_NONCLICKBAIT_PATH):
 		new_data = load_rich_dataset()
 		X_new = new_data[['ID', 'Video Title', 'Views', 'Likes', 'Dislikes']]
 		y_new = new_data['Label']
+		X_train, X_test, y_train, y_test = train_test_split(X_new, y_new, test_size=0.2, random_state=42)
 
-		trainer_new = Trainer(CombinedFeatures())
-		trainer_new.fit(X_new, y_new)
-		trainer_new.save(MODEL_RICH_PATH)
-		print("New model trained and saved.")
+		print("\n--- Rich Feature Models ---")
+		for model_name, model in [
+			("Random Forest", RandomForestClassifier(n_estimators=100, random_state=42)),
+			("Logistic Regression", LogisticRegression(max_iter=1000)),
+			("SVM", SVC(kernel="linear", probability=False))
+		]:
+			trainer = Trainer(CombinedFeatures(), model=model)
+			trainer.fit(X_train, y_train)
+			acc, f1, recall = evaluate_model(f"{model_name} (Rich)", trainer, X_test, y_test)
+			rich_scores[model_name] = (acc, f1, recall)
 	else:
-		trainer_new = None
-		print("New dataset not found, skipping new model training.")
+		print("Rich dataset not found, skipping rich model training.")
 
-	return trainer_old, trainer_new
+	# Show results
+	if title_scores or rich_scores:
+		plot_model_metrics(title_scores, rich_scores)
 
 # === PREDICTION USING ENSEMBLE ===
 def predict_ensemble(video_id, title, views=None, likes=None, dislikes=None):
@@ -229,9 +262,59 @@ def predict_ensemble(video_id, title, views=None, likes=None, dislikes=None):
 	print(f"Prediction: {label} ({confidence*100:.2f}% confidence)")
 	return preds[0], confidence
 
+def plot_model_metrics(title_scores, rich_scores):
+	models = list(title_scores.keys())
+
+	title_acc = [title_scores[m][0] for m in models]
+	title_f1 = [title_scores[m][1] for m in models]
+	title_recall = [title_scores[m][2] for m in models]
+
+	rich_acc = [rich_scores.get(m, (0, 0, 0))[0] for m in models]
+	rich_f1 = [rich_scores.get(m, (0, 0, 0))[1] for m in models]
+	rich_recall = [rich_scores.get(m, (0, 0, 0))[2] for m in models]
+
+	x = np.arange(len(models))
+	width = 0.35
+
+	plt.figure(figsize=(14, 6))
+
+	# Accuracy
+	plt.subplot(1, 3, 1)
+	plt.title("Model Accuracy")
+	plt.bar(x - width/2, title_acc, width, label='Title-Only')
+	plt.bar(x + width/2, rich_acc, width, label='Rich Features')
+	plt.xticks(x, models, rotation=45)
+	plt.ylim(0, 1)
+	plt.ylabel("Accuracy")
+	plt.legend()
+
+	# F1 Score
+	plt.subplot(1, 3, 2)
+	plt.title("Macro F1 Score")
+	plt.bar(x - width/2, title_f1, width, label='Title-Only')
+	plt.bar(x + width/2, rich_f1, width, label='Rich Features')
+	plt.xticks(x, models, rotation=45)
+	plt.ylim(0, 1)
+	plt.ylabel("F1 Score")
+	plt.legend()
+
+	# Recall
+	plt.subplot(1, 3, 3)
+	plt.title("Macro Recall")
+	plt.bar(x - width/2, title_recall, width, label='Title-Only')
+	plt.bar(x + width/2, rich_recall, width, label='Rich Features')
+	plt.xticks(x, models, rotation=45)
+	plt.ylim(0, 1)
+	plt.ylabel("Recall")
+	plt.legend()
+
+	plt.tight_layout()
+	plt.show()
+
+
 # === MAIN ===
 if __name__ == "__main__":
-	# train_and_save_models()
+	train_and_save_models()
 
 	# Example prediction:
-	predict_ensemble("hfFGTVZNjis", "MrBeast HATES Chandler after this..", views=17166, likes=1207, dislikes=554)
+	# predict_ensemble("hfFGTVZNjis", "MrBeast HATES Chandler after this..", views=17166, likes=1207, dislikes=554)
